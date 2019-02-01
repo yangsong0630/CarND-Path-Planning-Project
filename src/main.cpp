@@ -8,6 +8,7 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "spline.h"
 
 using namespace std;
 
@@ -230,7 +231,9 @@ int main() {
           	// Previous path data given to the Planner
           	auto previous_path_x = j[1]["previous_path_x"];
           	auto previous_path_y = j[1]["previous_path_y"];
-          	// Previous path's end s and d values 
+		int prev_size = previous_path_x.size();
+
+		// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
 
@@ -239,11 +242,87 @@ int main() {
 
           	json msgJson;
 
-          	vector<double> next_x_vals;
+
+		vector<double> pts_x, pts_y;
+		
+		// Option 1: add two points tangent to previous path
+		double ref_x = car_x, ref_y = car_y, ref_yaw = deg2rad(car_yaw);
+		if (prev_size < 2)
+		{
+		  // last and the one before last positions, tangent to current heading of the car
+		    double prev_car_x = car_x - cos(car_yaw), prev_car_y = car_y - sin(car_yaw);
+		    pts_x.push_back(prev_car_x);
+		    pts_y.push_back(prev_car_y);
+		    pts_x.push_back(car_x);
+		    pts_y.push_back(car_y);
+		}
+		else
+		{
+		  // Option 2: use last two points from previous path points
+		  ref_x = previous_path_x[prev_size-1];
+	 	  ref_y = previous_path_y[prev_size-1];
+		  double prev_car_x = previous_path_x[prev_size-2], prev_car_y = previous_path_y[prev_size-2];
+		  ref_yaw = atan2(ref_y-prev_car_y, ref_x-prev_car_x);
+		  pts_x.push_back(prev_car_x);
+		  pts_y.push_back(prev_car_y);
+		  pts_x.push_back(ref_x);
+		  pts_y.push_back(ref_y);
+		}
+		// ref_yaw is car heading between the two points above. 
+		// To make current path as continuity of previous path, assume yaw is constant
+
+		// add three points spaced far apart
+		int lane = 1;
+		double spacing = 30
+		for (int i = 1; i <= 3; i++)
+		{
+		  auto waypoint = getXY(car_s+spacing*i, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+		  pts_x.push_back(waypoint[0]);
+		  pts_y.push_back(waypoint[1]);
+		}
+		
+		// transform to car's perspective for easier calculation of each movement (ref angle 0 deg)
+		for (int i = 0; i < pts_x.size(); i++)
+		{
+		  double delta_x = pts_x[i]-ref_x, delta_y = pts_y[i]-ref_y;
+		  pts_x[i] = delta_x * cos(ref_yaw) + delta_y * sin(ref_yaw);
+		  pts_y[i] = delta_y * cos(ref_yaw) - delta_x * sin(ref_yaw);
+		}
+		
+		// interpolate pts_x and pts_y, including 3 far spaced points and 2 points tangent to previous path
+		tk::spline s;
+		s.set_points(pts_x, pts_y);
+		
+		
+		vector<double> next_x_vals;
           	vector<double> next_y_vals;
+		// copy remaining previous path, followed by interpolated points
+		for (int i = 0; i < prev_size; i++)
+		{
+		  next_x_vals.push_back(previous_path_x[i]);
+		  next_y_vals.push_back(previous_path_y[i]);
+		}
+		
+		// sampling spline every 0.02s if travelling at ref_speed mph
+		double target_x = spacing, ref_speed_m_s = 49.5 * 1600 / 3600;
 
-
+		double target_y = s(target_x);
+		double target_dist = sqrt( target_x*target_x + target_y * target_y);
+		double num_samples = target_dist / (0.02 * ref_speed_m_s);
+		double accum_x = 0;
+		for (int i = 0; i < 50-prev_size; i++)
+		{
+		  accum_x += target_x / N;
+		  double temp_x = accum_x, temp_y = s(waypoint_x);
+		  // transform back to original heading
+		  double waypoint_x = temp_x * cos(ref_yaw) - temp_y * sin(ref_yaw);
+		  double waypoint_y = temp_x * sin(ref_yaw) + temp_y * cos(ref_yaw);
+		  next_x_vals.push_back(waypoint_x);
+		  next_y_vals.push_back(waypoint_y);
+		}
+ 
           	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+		
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 

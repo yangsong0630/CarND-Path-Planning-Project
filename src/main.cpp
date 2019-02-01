@@ -178,7 +178,8 @@ int main() {
   string map_file_ = "../data/highway_map.csv";
   // The max s value before wrapping around the track back to 0
   double max_s = 6945.554;
-
+  double ref_speed = 0.0;
+	
   ifstream in_map_(map_file_.c_str(), ifstream::in);
 
   string line;
@@ -241,8 +242,36 @@ int main() {
           	auto sensor_fusion = j[1]["sensor_fusion"];
 
           	json msgJson;
-
-
+		
+		if (prev_size > 0)
+		{
+		  car_s = end_path_s;
+		}
+		bool too_close = false;
+		int lane = 1;
+		for (int i = 0; i < sensor_fusion.size(); i++)
+		{
+		  float car_i_d = sensor_fusion[i][6];
+		  if ( d > 4*lane && d < 4*lane +4)
+		  {
+		    double car_i_vx = sensor_fusion[i][3], car_i_vy = sensor_fusion[i][4];
+		    double car_i_speed = sqrt(car_i_vx*car_i_vx + car_i_vy*car_i_vy);
+	            double car_i_next_s = sensor_fusion[i][5] + 0.02 * car_i_speed * prev_size;
+	 	    if (car_i_next_s > car_s && car_i_next_s - car_s < 30)
+		    {
+		       too_close = true;
+		    }
+		  }
+		}
+		if (too_close)
+		{
+		  ref_speed -= 0.5 * 1600 / 3600;
+		}
+		else if (ref_speed < 49.5)
+		{
+		  ref_speed += 0.5 * 1600 / 3600;
+		}
+		
 		vector<double> pts_x, pts_y;
 		
 		// Option 1: add two points tangent to previous path
@@ -272,7 +301,6 @@ int main() {
 		// To make current path as continuity of previous path, assume yaw is constant
 
 		// add three points spaced far apart
-		int lane = 1;
 		double spacing = 30
 		for (int i = 1; i <= 3; i++)
 		{
@@ -304,7 +332,7 @@ int main() {
 		}
 		
 		// sampling spline every 0.02s if travelling at ref_speed mph
-		double target_x = spacing, ref_speed_m_s = 49.5 * 1600 / 3600;
+		double target_x = spacing, ref_speed_m_s = ref_speed * 1600 / 3600;
 
 		double target_y = s(target_x);
 		double target_dist = sqrt( target_x*target_x + target_y * target_y);

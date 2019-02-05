@@ -9,6 +9,7 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
+#include "helper.h"
 
 using namespace std;
 
@@ -19,6 +20,7 @@ using json = nlohmann::json;
 constexpr double pi() { return M_PI; }
 double deg2rad(double x) { return x * pi() / 180; }
 double rad2deg(double x) { return x * 180 / pi(); }
+Points getAnchorPoints(Status&, int, vector<double>&, vector<double>&,vector<double>&,vector<double>&,vector<double>&);
 double ref_speed = 0.0;
 
 // Checks if the SocketIO event has JSON data.
@@ -165,6 +167,61 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 
 }
 
+// car info: x, y, yaw
+Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_path_x, vector<double>& previous_path_y, vector<double>& map_waypoints_s, vector<double>& map_waypoints_x, vector<double>& map_waypoints_y) {
+
+    Points anchors;
+
+    // last and the one before last positions, tangent to current heading of the car
+    int prev_size = previous_path_x.size();
+    double prev_car_x, prev_car_y;
+    // cout << "prev size " << prev_size << endl;
+    if (prev_size < 2)
+    {
+        prev_car_x = ref_status.x - cos(ref_status.yaw);
+        prev_car_y = ref_status.y - sin(ref_status.yaw);
+        anchors.pts_x.push_back(prev_car_x);
+        anchors.pts_y.push_back(prev_car_y);
+        anchors.pts_x.push_back(ref_status.x);
+        anchors.pts_y.push_back(ref_status.y);
+    }
+    else
+    {
+        // Option 2: use last two points from previous path points
+        ref_status.x = previous_path_x[prev_size-1];
+        ref_status.y = previous_path_y[prev_size-1];
+        prev_car_x = previous_path_x[prev_size-2];
+        prev_car_y = previous_path_y[prev_size-2];
+        ref_status.yaw = atan2(ref_status.y-prev_car_y, ref_status.x-prev_car_x);
+        anchors.pts_x.push_back(prev_car_x);
+        anchors.pts_y.push_back(prev_car_y);
+        anchors.pts_x.push_back(ref_status.x);
+        anchors.pts_y.push_back(ref_status.y);
+    }
+    // add three points spaced far apart
+    double spacing = 30;
+    for (int i = 1; i <= 3; i++)
+    {
+      auto waypoint = getXY(ref_status.s + spacing*i, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
+      anchors.pts_x.push_back(waypoint[0]);
+      anchors.pts_y.push_back(waypoint[1]);
+    }
+    
+    anchors.num_pts = anchors.pts_x.size();
+    // transform to car's perspective for easier calculation of each movement (ref angle 0 deg)
+    for (int i = 0; i < anchors.num_pts; i++)
+    {
+      double delta_x = anchors.pts_x[i]-ref_status.x, delta_y = anchors.pts_y[i]-ref_status.y;
+      anchors.pts_x[i] = delta_x * cos(ref_status.yaw) + delta_y * sin(ref_status.yaw);
+      anchors.pts_y[i] = delta_y * cos(ref_status.yaw) - delta_x * sin(ref_status.yaw);
+      // cout << "pts_x " << anchors.pts_x[i] << ", pts_y " << anchors.pts_y[i] << endl;
+    }
+    
+    return anchors;
+}
+
+
+// Entry Point
 int main() {
   uWS::Hub h;
 
@@ -202,7 +259,8 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  double ref_speed = 0.0;
+  h.onMessage([&ref_speed, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -230,8 +288,8 @@ int main() {
           	double car_speed = j[1]["speed"];
 
           	// Previous path data given to the Planner
-          	auto previous_path_x = j[1]["previous_path_x"];
-          	auto previous_path_y = j[1]["previous_path_y"];
+          	vector<double> previous_path_x = j[1]["previous_path_x"];
+          	vector<double> previous_path_y = j[1]["previous_path_y"];
 
 
 		    // Previous path's end s and d values 
@@ -244,7 +302,6 @@ int main() {
           	json msgJson;
 		    int prev_size = previous_path_x.size();
             int lane = 1;
-            /*ref_speed = car_speed;
 
 		    if (prev_size > 0)
 		    {
@@ -268,22 +325,26 @@ int main() {
 		    }
 		    if (too_close)
 		    {
-		      ref_speed -= 0.5 * 1600 / 3600;
+		      ref_speed -= 1.0 * 1600 / 3600;
 		    }
 		    else if (ref_speed < 49.5)
 		    {
-		      ref_speed += 0.5 * 1600 / 3600;
-		    }*/
+		      ref_speed += 1.0 * 1600 / 3600;
+		    }
 		    
-		    vector<double> pts_x, pts_y;
+            cout << "ref_speed " << ref_speed << endl;
 		    
 		    // Option 1: add two points tangent to previous path
-		    double ref_x = car_x, ref_y = car_y, ref_yaw = deg2rad(car_yaw);
-		    if (prev_size < 2)
+            Status ref_status = {car_s, car_d, car_x, car_y, deg2rad(car_yaw)};
+            Points anchors = getAnchorPoints(ref_status, lane, previous_path_x, previous_path_y, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+		    
+            double ref_x = car_x, ref_y = car_y, ref_yaw = deg2rad(car_yaw);
+            double spacing = 30;
+		    /*vector<double> pts_x, pts_y;
+            if (prev_size < 2)
 		    {
-		      // last and the one before last positions, tangent to current heading of the car
-                cout << "prev_size " << prev_size << endl;
-		        double prev_car_x = car_x - cos(car_yaw), prev_car_y = car_y - sin(car_yaw);
+		        // last and the one before last positions, tangent to current heading of the car
+		        double prev_car_x = car_x - cos(ref_yaw), prev_car_y = car_y - sin(ref_yaw);
 		        pts_x.push_back(prev_car_x);
 		        pts_y.push_back(prev_car_y);
 		        pts_x.push_back(car_x);
@@ -300,12 +361,13 @@ int main() {
 		      pts_y.push_back(prev_car_y);
 		      pts_x.push_back(ref_x);
 		      pts_y.push_back(ref_y);
-		    }
+		    }*/
+
 		    // ref_yaw is car heading between the two points above. 
 		    // To make current path as continuity of previous path, assume yaw is constant
 
 		    // add three points spaced far apart
-		    double spacing = 30;
+		    /*
 		    for (int i = 1; i <= 3; i++)
 		    {
 		      auto waypoint = getXY(car_s+spacing*i, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -319,11 +381,11 @@ int main() {
 		      double delta_x = pts_x[i]-ref_x, delta_y = pts_y[i]-ref_y;
 		      pts_x[i] = delta_x * cos(ref_yaw) + delta_y * sin(ref_yaw);
 		      pts_y[i] = delta_y * cos(ref_yaw) - delta_x * sin(ref_yaw);
-		    }
+		    }*/
 		    
 		    // interpolate pts_x and pts_y, including 3 far spaced points and 2 points tangent to previous path
 		    tk::spline s;
-		    s.set_points(pts_x, pts_y);
+		    s.set_points(anchors.pts_x, anchors.pts_y);
 
 		    vector<double> next_x_vals;
             vector<double> next_y_vals;
@@ -335,21 +397,21 @@ int main() {
 		    }
 		    
 		    // sampling spline every 0.02s if travelling at ref_speed mph
-            double ref_vel = 49.5;
-		    double target_x = spacing, ref_speed_m_s = ref_vel * 1600 / 3600;
+		    double target_x = spacing, ref_speed_m_s = ref_speed * 1600 / 3600;
 
 		    double target_y = s(target_x);
 		    double target_dist = sqrt( target_x*target_x + target_y * target_y);
 		    double num_samples = target_dist / (0.02 * ref_speed_m_s);
 		    double accum_x = 0;
-
+            //cout << "num_samples " << num_samples << ", ref_speed_m_s " << ref_speed_m_s << endl;
 		    for (int i = 0; i < 50-prev_size; i++)
 		    {
 		      accum_x += target_x / num_samples;
+              //cout << "accum_x " << accum_x << endl;
 		      double temp_x = accum_x, temp_y = s(accum_x);
 		      // transform back to original heading
-		      double waypoint_x = temp_x * cos(ref_yaw) - temp_y * sin(ref_yaw) + ref_x;
-		      double waypoint_y = temp_x * sin(ref_yaw) + temp_y * cos(ref_yaw) + ref_y;
+		      double waypoint_x = temp_x * cos(ref_status.yaw) - temp_y * sin(ref_status.yaw) + ref_status.x;
+		      double waypoint_y = temp_x * sin(ref_status.yaw) + temp_y * cos(ref_status.yaw) + ref_status.y;
 		      next_x_vals.push_back(waypoint_x);
               /*cout << "next_x_vals appending " << waypoint_x << endl;
               cout << "next_y_vals appending " << waypoint_y << endl;*/
@@ -407,3 +469,4 @@ int main() {
   }
   h.run();
 }
+

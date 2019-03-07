@@ -11,163 +11,17 @@
 #include "spline.h"
 #include "helper.h"
 
-using namespace std;
+const double MAX_LEGAL_SPEED = 49.5;
+const double BUFFER_DIST = 30;
+const double LC_BUFFER_BACK_DIST = 20;
+const double SPACING = 30;
+const double UNINIT_SPEED = 1000;
+const double UNINIT_DIST = 10000;
 
-// for convenience
+using namespace std;
 using json = nlohmann::json;
 
-// For converting back and forth between radians and degrees.
-constexpr double pi() { return M_PI; }
-double deg2rad(double x) { return x * pi() / 180; }
-double rad2deg(double x) { return x * 180 / pi(); }
-Points getAnchorPoints(Status&, int, vector<double>&, vector<double>&,vector<double>&,vector<double>&,vector<double>&);
-double ref_speed = 0.0;
-
-// Checks if the SocketIO event has JSON data.
-// If there is data the JSON object in string format will be returned,
-// else the empty string "" will be returned.
-string hasData(string s) {
-  auto found_null = s.find("null");
-  auto b1 = s.find_first_of("[");
-  auto b2 = s.find_first_of("}");
-  if (found_null != string::npos) {
-    return "";
-  } else if (b1 != string::npos && b2 != string::npos) {
-    return s.substr(b1, b2 - b1 + 2);
-  }
-  return "";
-}
-
-double distance(double x1, double y1, double x2, double y2)
-{
-	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
-}
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	double closestLen = 100000; //large number
-	int closestWaypoint = 0;
-
-	for(int i = 0; i < maps_x.size(); i++)
-	{
-		double map_x = maps_x[i];
-		double map_y = maps_y[i];
-		double dist = distance(x,y,map_x,map_y);
-		if(dist < closestLen)
-		{
-			closestLen = dist;
-			closestWaypoint = i;
-		}
-
-	}
-
-	return closestWaypoint;
-
-}
-
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
-
-	double map_x = maps_x[closestWaypoint];
-	double map_y = maps_y[closestWaypoint];
-
-	double heading = atan2((map_y-y),(map_x-x));
-
-	double angle = fabs(theta-heading);
-  angle = min(2*pi() - angle, angle);
-
-  if(angle > pi()/2)
-  {
-    closestWaypoint++;
-  if (closestWaypoint == maps_x.size())
-  {
-    closestWaypoint = 0;
-  }
-  }
-
-  return closestWaypoint;
-}
-
-// Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
-
-	int prev_wp;
-	prev_wp = next_wp-1;
-	if(next_wp == 0)
-	{
-		prev_wp  = maps_x.size()-1;
-	}
-
-	double n_x = maps_x[next_wp]-maps_x[prev_wp];
-	double n_y = maps_y[next_wp]-maps_y[prev_wp];
-	double x_x = x - maps_x[prev_wp];
-	double x_y = y - maps_y[prev_wp];
-
-	// find the projection of x onto n
-	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
-	double proj_x = proj_norm*n_x;
-	double proj_y = proj_norm*n_y;
-
-	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
-
-	//see if d value is positive or negative by comparing it to a center point
-
-	double center_x = 1000-maps_x[prev_wp];
-	double center_y = 2000-maps_y[prev_wp];
-	double centerToPos = distance(center_x,center_y,x_x,x_y);
-	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
-
-	if(centerToPos <= centerToRef)
-	{
-		frenet_d *= -1;
-	}
-
-	// calculate s value
-	double frenet_s = 0;
-	for(int i = 0; i < prev_wp; i++)
-	{
-		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
-	}
-
-	frenet_s += distance(0,0,proj_x,proj_y);
-
-	return {frenet_s,frenet_d};
-
-}
-
-// Transform from Frenet s,d coordinates to Cartesian x,y
-vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int prev_wp = -1;
-
-	while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
-	{
-		prev_wp++;
-	}
-
-	int wp2 = (prev_wp+1)%maps_x.size();
-
-	double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
-	// the x,y,s along the segment
-	double seg_s = (s-maps_s[prev_wp]);
-
-	double seg_x = maps_x[prev_wp]+seg_s*cos(heading);
-	double seg_y = maps_y[prev_wp]+seg_s*sin(heading);
-
-	double perp_heading = heading-pi()/2;
-
-	double x = seg_x + d*cos(perp_heading);
-	double y = seg_y + d*sin(perp_heading);
-
-	return {x,y};
-
-}
-
-// car info: x, y, yaw
+// based on latest car status, generate anchor points for spline
 Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_path_x, vector<double>& previous_path_y, vector<double>& map_waypoints_s, vector<double>& map_waypoints_x, vector<double>& map_waypoints_y) {
 
     Points anchors;
@@ -175,7 +29,7 @@ Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_pa
     // last and the one before last positions, tangent to current heading of the car
     int prev_size = previous_path_x.size();
     double prev_car_x, prev_car_y;
-    // cout << "prev size " << prev_size << endl;
+
     if (prev_size < 2)
     {
         prev_car_x = ref_status.x - cos(ref_status.yaw);
@@ -198,8 +52,9 @@ Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_pa
         anchors.pts_x.push_back(ref_status.x);
         anchors.pts_y.push_back(ref_status.y);
     }
+
     // add three points spaced far apart
-    double spacing = 30;
+    double spacing = SPACING;
     for (int i = 1; i <= 3; i++)
     {
       auto waypoint = getXY(ref_status.s + spacing*i, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
@@ -208,6 +63,7 @@ Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_pa
     }
     
     anchors.num_pts = anchors.pts_x.size();
+
     // transform to car's perspective for easier calculation of each movement (ref angle 0 deg)
     for (int i = 0; i < anchors.num_pts; i++)
     {
@@ -259,8 +115,8 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  double ref_speed = 0.0;
-  h.onMessage([&ref_speed, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  double ref_speed_mph = 0.0;
+  h.onMessage([&ref_speed_mph, &map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -301,94 +157,117 @@ int main() {
 
           	json msgJson;
 		    int prev_size = previous_path_x.size();
-            int lane = 1;
+            
+            int lane = ((int)car_d) / 4;
 
 		    if (prev_size > 0)
 		    {
 		      car_s = end_path_s;
 		    }
 		    bool too_close = false;
+            bool can_change_left = (lane > 0);
+            bool can_change_right = (lane < 2);
+            double lead_car_speed_ms = UNINIT_SPEED; // initialize to a big number
+          	double lead_car_dist = UNINIT_DIST; // initialize to a big number
 
+            /*double left_lead_speed = 50;
+            double right_lead_speed = 50; // TBD: taking target lane lead car speed into consideration */
+            
+            // analyzing sensed other cars on the road
 		    for (int i = 0; i < sensor_fusion.size(); i++)
 		    {
-		      float car_i_d = sensor_fusion[i][6];
-		      if ( car_i_d > 4*lane && car_i_d < 4*lane +4)
-		      {
+		        float car_i_d = sensor_fusion[i][6];
 		        double car_i_vx = sensor_fusion[i][3], car_i_vy = sensor_fusion[i][4];
-		        double car_i_speed = sqrt(car_i_vx*car_i_vx + car_i_vy*car_i_vy);
+		        double car_i_speed = sqrt(car_i_vx*car_i_vx + car_i_vy*car_i_vy); // m/s
+                // predicted future s value for the car
 	            double car_i_next_s = (double)sensor_fusion[i][5] + 0.02 * car_i_speed * prev_size;
-	     	    if (car_i_next_s > car_s && car_i_next_s - car_s < 30)
+
+                // if the car is in the same lane
+		        if ( car_i_d > 4*lane && car_i_d < 4*(lane+1))
 		        {
-		           too_close = true;
+                    // closer to previously identified lead car
+	     	        if (car_i_next_s > car_s && (car_i_next_s - car_s) < lead_car_dist )
+		            {
+                        lead_car_speed_ms = car_i_speed;
+                      	lead_car_dist = car_i_next_s - car_s;
+		                too_close = (lead_car_dist < BUFFER_DIST);
+		            }
 		        }
-		      }
+                else if (can_change_left && car_i_d > 4*(lane-1) && car_i_d < 4*lane)
+                {
+                    // left to current lane
+                    if ((car_s > car_i_next_s && car_s - car_i_next_s < LC_BUFFER_BACK_DIST) || 
+                        (car_s < car_i_next_s && car_i_next_s - car_s < BUFFER_DIST) )
+                    {
+                        //cout << "cannot change left, car within " << abs(car_s - car_i_next_s) << " m" << endl;
+                        can_change_left = false;
+                    }
+                }
+                else if (can_change_right && car_i_d > 4*(lane+1) && car_i_d < 4*(lane+2))
+                {
+                    // right to current lane
+                    if ((car_s > car_i_next_s && car_s - car_i_next_s < LC_BUFFER_BACK_DIST) || 
+                        (car_s < car_i_next_s && car_i_next_s - car_s < BUFFER_DIST) )
+                    {
+                        //cout << "cannot change right, car within " << abs(car_s - car_i_next_s) << " m" << endl;
+                        can_change_right = false;
+                    }
+                }
 		    }
+
 		    if (too_close)
 		    {
-		      ref_speed -= 1.0 * 1600 / 3600;
+                // If the car ahead of us is too close and there is enough gap for lane change
+                if (can_change_left && lane > 0)
+                {
+                    lane = lane - 1;
+                }
+                else if (can_change_right && lane < 2)
+                {
+                    lane = lane + 1;
+                }
+                else
+                {
+                    // if there is not enough gap for lane change, decelerate till a little slower than lead car
+                    if (ref_speed_mph > ms2mph(lead_car_speed_ms) - 2.0)
+                    {
+		                ref_speed_mph -= ms2mph(0.2); // max acceleration 10m/s^2 => +0.2m/s per 0.02s 
+                    }
+                }
 		    }
-		    else if (ref_speed < 49.5)
+		    else 
 		    {
-		      ref_speed += 1.0 * 1600 / 3600;
+                if ( lane != 1 && ((lane == 0 && can_change_right)||(lane == 2 && can_change_left)) )
+                { 
+                    // if we are not on the center lane, considering changing back to center lane
+                    lane = 1; 
+                }
+
+                // if current speed is less than max legal speed, and there is enough buffer distance ahead, accelerate
+                if ( ref_speed_mph < MAX_LEGAL_SPEED && lead_car_dist > BUFFER_DIST * 1.5) 
+                {
+		            ref_speed_mph += ms2mph(0.2); // max acceleration 10m/s^2 => +0.2m/s per 0.02s 
+                }
 		    }
 		    
-            cout << "ref_speed " << ref_speed << endl;
+            /*cout << "lead_speed " << ms2mph(lead_car_speed)  << ", car_d " << car_d << ", lane " << lane << " ref_speed " << ref_speed_mph << endl;
+            cout << "can change left " << can_change_left << ", can change right " << can_change_right << endl;*/
+
 		    
-		    // Option 1: add two points tangent to previous path
             Status ref_status = {car_s, car_d, car_x, car_y, deg2rad(car_yaw)};
+
+            // get anchor points for spline: 2 from previous path, 3 far spaced points
             Points anchors = getAnchorPoints(ref_status, lane, previous_path_x, previous_path_y, map_waypoints_s, map_waypoints_x, map_waypoints_y);
 		    
             double ref_x = car_x, ref_y = car_y, ref_yaw = deg2rad(car_yaw);
-            double spacing = 30;
-		    /*vector<double> pts_x, pts_y;
-            if (prev_size < 2)
-		    {
-		        // last and the one before last positions, tangent to current heading of the car
-		        double prev_car_x = car_x - cos(ref_yaw), prev_car_y = car_y - sin(ref_yaw);
-		        pts_x.push_back(prev_car_x);
-		        pts_y.push_back(prev_car_y);
-		        pts_x.push_back(car_x);
-		        pts_y.push_back(car_y);
-		    }
-		    else
-		    {
-		      // Option 2: use last two points from previous path points
-		      ref_x = previous_path_x[prev_size-1];
-	     	  ref_y = previous_path_y[prev_size-1];
-		      double prev_car_x = previous_path_x[prev_size-2], prev_car_y = previous_path_y[prev_size-2];
-		      ref_yaw = atan2(ref_y-prev_car_y, ref_x-prev_car_x);
-		      pts_x.push_back(prev_car_x);
-		      pts_y.push_back(prev_car_y);
-		      pts_x.push_back(ref_x);
-		      pts_y.push_back(ref_y);
-		    }*/
 
-		    // ref_yaw is car heading between the two points above. 
-		    // To make current path as continuity of previous path, assume yaw is constant
-
-		    // add three points spaced far apart
-		    /*
-		    for (int i = 1; i <= 3; i++)
-		    {
-		      auto waypoint = getXY(car_s+spacing*i, (2+4*lane), map_waypoints_s, map_waypoints_x, map_waypoints_y);
-		      pts_x.push_back(waypoint[0]);
-		      pts_y.push_back(waypoint[1]);
-		    }
-		    
-		    // transform to car's perspective for easier calculation of each movement (ref angle 0 deg)
-		    for (int i = 0; i < pts_x.size(); i++)
-		    {
-		      double delta_x = pts_x[i]-ref_x, delta_y = pts_y[i]-ref_y;
-		      pts_x[i] = delta_x * cos(ref_yaw) + delta_y * sin(ref_yaw);
-		      pts_y[i] = delta_y * cos(ref_yaw) - delta_x * sin(ref_yaw);
-		    }*/
-		    
-		    // interpolate pts_x and pts_y, including 3 far spaced points and 2 points tangent to previous path
+		    // interpolate pts_x and pts_y using spline
 		    tk::spline s;
 		    s.set_points(anchors.pts_x, anchors.pts_y);
 
 		    vector<double> next_x_vals;
             vector<double> next_y_vals;
+
 		    // copy remaining previous path, followed by interpolated points
 		    for (int i = 0; i < prev_size; i++)
 		    {
@@ -396,29 +275,27 @@ int main() {
 		      next_y_vals.push_back(previous_path_y[i]);
 		    }
 		    
-		    // sampling spline every 0.02s if travelling at ref_speed mph
-		    double target_x = spacing, ref_speed_m_s = ref_speed * 1600 / 3600;
-
+		    // sampling spline every 0.02s if travelling at ref_speed_mph
+		    double target_x = SPACING, ref_speed_m_s = mph2ms(ref_speed_mph);
 		    double target_y = s(target_x);
 		    double target_dist = sqrt( target_x*target_x + target_y * target_y);
+
 		    double num_samples = target_dist / (0.02 * ref_speed_m_s);
 		    double accum_x = 0;
-            //cout << "num_samples " << num_samples << ", ref_speed_m_s " << ref_speed_m_s << endl;
+
 		    for (int i = 0; i < 50-prev_size; i++)
 		    {
 		      accum_x += target_x / num_samples;
-              //cout << "accum_x " << accum_x << endl;
 		      double temp_x = accum_x, temp_y = s(accum_x);
+
 		      // transform back to original heading
 		      double waypoint_x = temp_x * cos(ref_status.yaw) - temp_y * sin(ref_status.yaw) + ref_status.x;
 		      double waypoint_y = temp_x * sin(ref_status.yaw) + temp_y * cos(ref_status.yaw) + ref_status.y;
+
 		      next_x_vals.push_back(waypoint_x);
-              /*cout << "next_x_vals appending " << waypoint_x << endl;
-              cout << "next_y_vals appending " << waypoint_y << endl;*/
 		      next_y_vals.push_back(waypoint_y);
 		    }
  
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	msgJson["next_x"] = next_x_vals;
           	msgJson["next_y"] = next_y_vals;
 

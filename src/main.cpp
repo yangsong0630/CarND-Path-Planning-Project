@@ -70,7 +70,6 @@ Points getAnchorPoints(Status& ref_status, int lane, vector<double>& previous_pa
       double delta_x = anchors.pts_x[i]-ref_status.x, delta_y = anchors.pts_y[i]-ref_status.y;
       anchors.pts_x[i] = delta_x * cos(ref_status.yaw) + delta_y * sin(ref_status.yaw);
       anchors.pts_y[i] = delta_y * cos(ref_status.yaw) - delta_x * sin(ref_status.yaw);
-      // cout << "pts_x " << anchors.pts_x[i] << ", pts_y " << anchors.pts_y[i] << endl;
     }
     
     return anchors;
@@ -170,8 +169,6 @@ int main() {
             double lead_car_speed_ms = UNINIT_SPEED; // initialize to a big number
           	double lead_car_dist = UNINIT_DIST; // initialize to a big number
 
-            /*double left_lead_speed = 50;
-            double right_lead_speed = 50; // TBD: taking target lane lead car speed into consideration */
             
             // analyzing sensed other cars on the road
 		    for (int i = 0; i < sensor_fusion.size(); i++)
@@ -250,10 +247,7 @@ int main() {
                 }
 		    }
 		    
-            /*cout << "lead_speed " << ms2mph(lead_car_speed)  << ", car_d " << car_d << ", lane " << lane << " ref_speed " << ref_speed_mph << endl;
-            cout << "can change left " << can_change_left << ", can change right " << can_change_right << endl;*/
 
-		    
             Status ref_status = {car_s, car_d, car_x, car_y, deg2rad(car_yaw)};
 
             // get anchor points for spline: 2 from previous path, 3 far spaced points
@@ -301,7 +295,6 @@ int main() {
 
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
-          	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
           
         }

@@ -1,0 +1,11 @@
+
+safety: lane change path should optimize the distance away from other traffic
+comfort: low acceleration and jerk
+    => linear equation for s and d to calculate acceleration and jerk, see Quintic Polynomial Solver
+        and Polynomial Trajectory
+
+predict where the other cars will be in the future: s_future = s_current + v * T, where v is transformed to (s,d) coordinates
+
+
+lane_shift: if in left most lane || there is car within 30m ahead || there is car within 50m behind, do no shift left
+
